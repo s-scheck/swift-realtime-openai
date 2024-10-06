@@ -17,5 +17,9 @@ let package = Package(
 	],
 	targets: [
 		.target(name: "OpenAI", path: "./src"),
-	]
+	],
+	dependencies: [
+        // Abhängigkeiten
+        .package(url: "https://github.com/anderesPackage.git", from: "1.2.0"),
+    ]
 )
