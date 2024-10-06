@@ -6,65 +6,66 @@ public enum ConversationError: Error {
 
 @Observable
 public final class Conversation: Sendable {
-	private let client: RealtimeAPI
-	@MainActor private var cancelTask: (() -> Void)?
-	private let errorStream: AsyncStream<ServerError>.Continuation
-
-	public let errors: AsyncStream<ServerError>
-	@MainActor public private(set) var id: String?
-	@MainActor public private(set) var session: Session?
-	@MainActor public private(set) var entries: [Item] = []
-	@MainActor public private(set) var connected: Bool = false
-
-	public let audioStream: AsyncStream<Data>
+    private let client: RealtimeAPI
+    @MainActor private var cancelTask: (() -> Void)?
+    private let errorStream: AsyncStream<ServerError>.Continuation
+	
+    public let errors: AsyncStream<ServerError>
+    public let audioStream: AsyncStream<Data>
     private let audioStreamContinuation: AsyncStream<Data>.Continuation
+    @MainActor public private(set) var id: String?
+    @MainActor public private(set) var session: Session?
+    @MainActor public private(set) var entries: [Item] = []
+    @MainActor public private(set) var connected: Bool = false
 
-	private init(client: RealtimeAPI) {
-		self.client = client
-		(errors, errorStream) = AsyncStream.makeStream(of: ServerError.self)
+    // Designated initializer
+    private init(client: RealtimeAPI) {
+        self.client = client
+        (errors, errorStream) = AsyncStream.makeStream(of: ServerError.self)
+        (audioStream, audioStreamContinuation) = AsyncStream.makeStream(of: Data.self)
 
-		let task = Task.detached { [weak self] in
-			guard let self else { return }
+        let task = Task.detached { [weak self] in
+            guard let self else { return }
 
-			for try await event in client.events {
-				await self.handleEvent(event)
-			}
+            for try await event in client.events {
+                await self.handleEvent(event)
+            }
 
-			await MainActor.run {
-				self.connected = false
-			}
-		}
+            await MainActor.run {
+                self.connected = false
+            }
+        }
 
-		Task { @MainActor in
-			self.cancelTask = task.cancel
+        Task { @MainActor in
+            self.cancelTask = task.cancel
 
-			client.onDisconnect = { [weak self] in
-				guard let self else { return }
+            client.onDisconnect = { [weak self] in
+                guard let self else { return }
 
-				Task { @MainActor in
-					self.connected = false
-				}
-			}
-		}
-	}
+                Task { @MainActor in
+                    self.connected = false
+                }
+            }
+        }
+    }
 
-	deinit {
-		errorStream.finish()
-		audioStreamContinuation.finish()
+    // Convenience initializer
+    public convenience init(authToken token: String, model: String = "gpt-4o-realtime-preview-2024-10-01") {
+        self.init(client: RealtimeAPI(authToken: token, model: model))
+    }
 
-		DispatchQueue.main.asyncAndWait {
-			cancelTask?()
-		}
-	}
+    public convenience init(connectingTo request: URLRequest) {
+        self.init(client: RealtimeAPI(connectingTo: request))
+    }
 
-	public convenience init(authToken token: String, model: String = "gpt-4o-realtime-preview-2024-10-01") {
-		self.init(client: RealtimeAPI(authToken: token, model: model))
-		(audioStream, audioStreamContinuation) = AsyncStream.makeStream(of: Data.self)
-	}
+    deinit {
+        errorStream.finish()
+        audioStreamContinuation.finish()
 
-	public convenience init(connectingTo request: URLRequest) {
-		self.init(client: RealtimeAPI(connectingTo: request))
-	}
+        DispatchQueue.main.asyncAndWait {
+            cancelTask?()
+        }
+    }
 
 	@MainActor public func whenConnected<E>(_ callback: @Sendable () async throws(E) -> Void) async throws(E) {
 		while true {
