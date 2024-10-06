@@ -17,9 +17,5 @@ let package = Package(
 	],
 	targets: [
 		.target(name: "OpenAI", path: "./src"),
-	],
-	dependencies: [
-        // Abhängigkeiten
-        .package(url: "https://github.com/s-scheck/swift-realtime-openai.git", from: "1.2.0"),
-    ]
+	]
 )
