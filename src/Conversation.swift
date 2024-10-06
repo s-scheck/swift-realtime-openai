@@ -16,6 +16,9 @@ public final class Conversation: Sendable {
 	@MainActor public private(set) var entries: [Item] = []
 	@MainActor public private(set) var connected: Bool = false
 
+	public let audioStream: AsyncStream<Data>
+    private let audioStreamContinuation: AsyncStream<Data>.Continuation
+
 	private init(client: RealtimeAPI) {
 		self.client = client
 		(errors, errorStream) = AsyncStream.makeStream(of: ServerError.self)
@@ -47,6 +50,7 @@ public final class Conversation: Sendable {
 
 	deinit {
 		errorStream.finish()
+		audioStreamContinuation.finish()
 
 		DispatchQueue.main.asyncAndWait {
 			cancelTask?()
@@ -55,6 +59,7 @@ public final class Conversation: Sendable {
 
 	public convenience init(authToken token: String, model: String = "gpt-4o-realtime-preview-2024-10-01") {
 		self.init(client: RealtimeAPI(authToken: token, model: model))
+		(audioStream, audioStreamContinuation) = AsyncStream.makeStream(of: Data.self)
 	}
 
 	public convenience init(connectingTo request: URLRequest) {
@@ -182,6 +187,13 @@ private extension Conversation {
 				updateEvent(id: event.itemId) { functionCall in
 					functionCall.arguments = event.arguments
 				}
+			case let .responseAudioDelta(event):
+				updateEvent(id: event.itemId) { message in
+					guard case let .audio(audio) = message.content[event.contentIndex] else { return }
+					message.content[event.contentIndex] = .audio(.init(audio: audio.audio + event.delta, transcript: audio.transcript))
+				}
+				// Yield the audio delta to the audioStream
+				audioStreamContinuation.yield(event.delta)
 			default:
 				return
 		}
