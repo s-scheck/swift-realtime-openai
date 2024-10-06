@@ -1,18 +1,18 @@
 import Foundation
 
 public enum ConversationError: Error {
-	case sessionNotFound
+    case sessionNotFound
 }
 
 @Observable
 public final class Conversation: Sendable {
     private let client: RealtimeAPI
     @MainActor private var cancelTask: (() -> Void)?
-    private let errorStream: AsyncStream<ServerError>.Continuation
-	
-    public let errors: AsyncStream<ServerError>
-    public let audioStream: AsyncStream<Data>
-    private let audioStreamContinuation: AsyncStream<Data>.Continuation
+    private var errorStream: AsyncStream<ServerError>.Continuation
+
+    public var errors: AsyncStream<ServerError>
+    public var audioStream: AsyncStream<Data>
+    private var audioStreamContinuation: AsyncStream<Data>.Continuation
     @MainActor public private(set) var id: String?
     @MainActor public private(set) var session: Session?
     @MainActor public private(set) var entries: [Item] = []
@@ -21,13 +21,21 @@ public final class Conversation: Sendable {
     // Designated initializer
     private init(client: RealtimeAPI) {
         self.client = client
-        (errors, errorStream) = AsyncStream.makeStream(of: ServerError.self)
-        (audioStream, audioStreamContinuation) = AsyncStream.makeStream(of: Data.self)
+
+        // Initialize the error stream
+        let (errorsStream, errorsContinuation) = AsyncStream<ServerError>.makeStream()
+        self.errors = errorsStream
+        self.errorStream = errorsContinuation
+
+        // Initialize the audio stream
+        let (audioStream, audioContinuation) = AsyncStream<Data>.makeStream()
+        self.audioStream = audioStream
+        self.audioStreamContinuation = audioContinuation
 
         let task = Task.detached { [weak self] in
-            guard let self else { return }
+            guard let self = self else { return }
 
-            for try await event in client.events {
+            for try await event in self.client.events {
                 await self.handleEvent(event)
             }
 
@@ -40,7 +48,7 @@ public final class Conversation: Sendable {
             self.cancelTask = task.cancel
 
             client.onDisconnect = { [weak self] in
-                guard let self else { return }
+                guard let self = self else { return }
 
                 Task { @MainActor in
                     self.connected = false
@@ -49,7 +57,7 @@ public final class Conversation: Sendable {
         }
     }
 
-    // Convenience initializer
+    // Convenience initializers
     public convenience init(authToken token: String, model: String = "gpt-4o-realtime-preview-2024-10-01") {
         self.init(client: RealtimeAPI(authToken: token, model: model))
     }
@@ -62,10 +70,11 @@ public final class Conversation: Sendable {
         errorStream.finish()
         audioStreamContinuation.finish()
 
-        DispatchQueue.main.asyncAndWait {
-            cancelTask?()
+        DispatchQueue.main.async {
+            self.cancelTask?()
         }
     }
+
 
 	@MainActor public func whenConnected<E>(_ callback: @Sendable () async throws(E) -> Void) async throws(E) {
 		while true {
@@ -189,27 +198,28 @@ private extension Conversation {
 					functionCall.arguments = event.arguments
 				}
 			case let .responseAudioDelta(event):
-				updateEvent(id: event.itemId) { message in
-					guard case let .audio(audio) = message.content[event.contentIndex] else { return }
-					message.content[event.contentIndex] = .audio(.init(audio: audio.audio + event.delta, transcript: audio.transcript))
-				}
-				// Yield the audio delta to the audioStream
-				audioStreamContinuation.yield(event.delta)
+		                updateEvent(id: event.itemId) { message in
+		                    guard case let .audio(audio) = message.content[event.contentIndex] else { return }
+		                    message.content[event.contentIndex] = .audio(.init(audio: audio.audio + event.delta, transcript: audio.transcript))
+		                }
+		                // Yield the audio delta to the audioStream
+		                audioStreamContinuation.yield(event.delta)
+
 			default:
 				return
 		}
 	}
 
 	@MainActor
-	func updateEvent(id: String, modifying closure: (inout Item.Message) -> Void) {
-		guard let index = entries.firstIndex(where: { $0.id == id }), case var .message(message) = entries[index] else {
-			return
-		}
-
-		closure(&message)
-
-		entries[index] = .message(message)
-	}
+	    private func updateEvent(id: String, modifying closure: (inout Item.Message) -> Void) {
+	        guard let index = entries.firstIndex(where: { $0.id == id }), case var .message(message) = entries[index] else {
+	            return
+	        }
+	
+	        closure(&message)
+	
+	        entries[index] = .message(message)
+	    }
 
 	@MainActor
 	func updateEvent(id: String, modifying closure: (inout Item.FunctionCall) -> Void) {
