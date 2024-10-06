@@ -113,10 +113,7 @@ public final class Conversation: Sendable {
         try await send(event: .createConversationItem(Item(with: output)))
     }
 
-}
-
-private extension Conversation {
-	@MainActor func handleEvent(_ event: ServerEvent) {
+@MainActor func handleEvent(_ event: ServerEvent) {
 		switch event {
 			case let .error(event):
 				errorStream.yield(event.error)
@@ -213,4 +210,6 @@ private extension Conversation {
 
 		entries[index] = .functionCall(functionCall)
 	}
+
 }
+
