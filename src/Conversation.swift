@@ -4,52 +4,49 @@ public enum ConversationError: Error {
     case sessionNotFound
 }
 
-@Observable
 public final class Conversation: Sendable {
     private let client: RealtimeAPI
-    @MainActor private var cancelTask: (() -> Void)?
-    private var errorStream: AsyncStream<ServerError>.Continuation
-
-    public var errors: AsyncStream<ServerError>
-    public var audioStream: AsyncStream<Data>
+    private var errorStreamContinuation: AsyncStream<ServerError>.Continuation
+    public let errors: AsyncStream<ServerError>
     private var audioStreamContinuation: AsyncStream<Data>.Continuation
+    public let audioStream: AsyncStream<Data>
+
     @MainActor public private(set) var id: String?
     @MainActor public private(set) var session: Session?
     @MainActor public private(set) var entries: [Item] = []
     @MainActor public private(set) var connected: Bool = false
 
+    private var cancelTask: Task<Void, Never>?
+
     // Designated initializer
-    private init(client: RealtimeAPI) {
+    public init(client: RealtimeAPI) {
         self.client = client
 
         // Initialize the error stream
-        let (errorsStream, errorsContinuation) = AsyncStream<ServerError>.makeStream()
-        self.errors = errorsStream
-        self.errorStream = errorsContinuation
+        (self.errors, self.errorStreamContinuation) = AsyncStream.makeStream(of: ServerError.self)
 
         // Initialize the audio stream
-        let (audioStream, audioContinuation) = AsyncStream<Data>.makeStream()
-        self.audioStream = audioStream
-        self.audioStreamContinuation = audioContinuation
+        (self.audioStream, self.audioStreamContinuation) = AsyncStream.makeStream(of: Data.self)
 
+        // Start receiving events from the client
         let task = Task.detached { [weak self] in
             guard let self = self else { return }
-
-            for try await event in self.client.events {
-                await self.handleEvent(event)
+            do {
+                for try await event in self.client.events {
+                    await self.handleEvent(event)
+                }
+            } catch {
+                // Handle errors if needed
             }
-
             await MainActor.run {
                 self.connected = false
             }
         }
 
         Task { @MainActor in
-            self.cancelTask = task.cancel
-
+            self.cancelTask = task
             client.onDisconnect = { [weak self] in
                 guard let self = self else { return }
-
                 Task { @MainActor in
                     self.connected = false
                 }
@@ -59,74 +56,63 @@ public final class Conversation: Sendable {
 
     // Convenience initializers
     public convenience init(authToken token: String, model: String = "gpt-4o-realtime-preview-2024-10-01") {
-        self.init(client: RealtimeAPI(authToken: token, model: model))
+        let client = RealtimeAPI(authToken: token, model: model)
+        self.init(client: client)
     }
 
     public convenience init(connectingTo request: URLRequest) {
-        self.init(client: RealtimeAPI(connectingTo: request))
+        let client = RealtimeAPI(connectingTo: request)
+        self.init(client: client)
     }
 
     deinit {
-        errorStream.finish()
+        errorStreamContinuation.finish()
         audioStreamContinuation.finish()
-
-        DispatchQueue.main.async {
-            self.cancelTask?()
-        }
+        cancelTask?.cancel()
     }
 
 
-	@MainActor public func whenConnected<E>(_ callback: @Sendable () async throws(E) -> Void) async throws(E) {
-		while true {
-			if connected {
-				return try await callback()
-			}
+	    @MainActor public func whenConnected<E>(_ callback: @Sendable () async throws -> E) async throws -> E {
+        while true {
+            if connected {
+                return try await callback()
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
 
-			try? await Task.sleep(for: .milliseconds(500))
-		}
-	}
+    public func updateSession(withChanges callback: (inout Session) -> Void) async throws {
+        guard var session = await session else {
+            throw ConversationError.sessionNotFound
+        }
+        callback(&session)
+        try await updateSession(session)
+    }
 
-	/// Make changes to the current session
-	/// Note that this will fail if the session hasn't started yet.
-	public func updateSession(withChanges callback: (inout Session) -> Void) async throws {
-		guard var session = await session else {
-			throw ConversationError.sessionNotFound
-		}
+    public func updateSession(_ session: Session) async throws {
+        var session = session
+        session.id = nil
+        try await client.send(event: .updateSession(session))
+    }
 
-		callback(&session)
+    public func send(event: ClientEvent) async throws {
+        try await client.send(event: event)
+    }
 
-		try await updateSession(session)
-	}
+    public func send(audioDelta audio: Data, commit: Bool = false) async throws {
+        try await send(event: .appendInputAudioBuffer(encoding: audio))
+        if commit { try await send(event: .commitInputAudioBuffer()) }
+    }
 
-	public func updateSession(_ session: Session) async throws {
-		// update endpoint errors if we include the session id
-		var session = session
-		session.id = nil
+    public func send(from role: Item.ItemRole, text: String, response: Response.Config? = nil) async throws {
+        try await send(event: .createConversationItem(Item(message: Item.Message(id: UUID().uuidString, from: role, content: [.input_text(text)]))))
+        try await send(event: .createResponse(response))
+    }
 
-		try await client.send(event: .updateSession(session))
-	}
+    public func send(result output: Item.FunctionCallOutput) async throws {
+        try await send(event: .createConversationItem(Item(with: output)))
+    }
 
-	public func send(event: ClientEvent) async throws {
-		try await client.send(event: event)
-	}
-
-	/// Append audio bytes to the conversation.
-	/// Commit the audio to trigger a model response when server turn detection is disabled.
-	public func send(audioDelta audio: Data, commit: Bool = false) async throws {
-		try await send(event: .appendInputAudioBuffer(encoding: audio))
-		if commit { try await send(event: .commitInputAudioBuffer()) }
-	}
-
-	/// Send a text message and wait for a response
-	public func send(from role: Item.ItemRole, text: String, response: Response.Config? = nil) async throws {
-		try await send(event: .createConversationItem(Item(message: Item.Message(id: String(randomLength: 32), from: role, content: [.input_text(text)]))))
-		try await send(event: .createResponse(response))
-	}
-
-	/// Send the response of a function call
-	public func send(result output: Item.FunctionCallOutput) async throws {
-		try await send(event: .createConversationItem(Item(with: output)))
-	}
 }
 
 private extension Conversation {
@@ -198,11 +184,7 @@ private extension Conversation {
 					functionCall.arguments = event.arguments
 				}
 			case let .responseAudioDelta(event):
-		                updateEvent(id: event.itemId) { message in
-		                    guard case let .audio(audio) = message.content[event.contentIndex] else { return }
-		                    message.content[event.contentIndex] = .audio(.init(audio: audio.audio + event.delta, transcript: audio.transcript))
-		                }
-		                // Yield the audio delta to the audioStream
+		                // Update your entries and yield to audioStreamContinuation
 		                audioStreamContinuation.yield(event.delta)
 
 			default:
