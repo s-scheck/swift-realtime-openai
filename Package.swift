@@ -20,6 +20,6 @@ let package = Package(
 	],
 	dependencies: [
         // Abhängigkeiten
-        .package(url: "https://github.com/anderesPackage.git", from: "1.2.0"),
+        .package(url: "https://github.com/s-scheck/swift-realtime-openai.git", from: "1.2.0"),
     ]
 )
